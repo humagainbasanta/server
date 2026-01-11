@@ -81,33 +81,44 @@ static void *bg_thread(void *arg) {
   }
 
   if (job->is_upload) {
-    FILE *in = fopen(job->path1, "rb");
-    if (!in) {
-      fprintf(stdout, "[Background] Command failed: upload\n");
-      fflush(stdout);
-      close(fd);
-      pending_dec();
-      free(job);
-      return NULL;
-    }
-    fseek(in, 0, SEEK_END);
-    long size = ftell(in);
-    fseek(in, 0, SEEK_SET);
-
-    sendf_line(fd, "upload %s %ld", job->path2, size);
-    char buf[4096];
-    long remaining = size;
-    while (remaining > 0) {
-      size_t n = fread(buf, 1, sizeof(buf), in);
-      if (n == 0) {
+    int attempts = 5;
+    int ok = 0;
+    char line[256];
+    while (attempts-- > 0) {
+      FILE *in = fopen(job->path1, "rb");
+      if (!in) {
         break;
       }
-      send_blob(fd, buf, n);
-      remaining -= (long)n;
+      fseek(in, 0, SEEK_END);
+      long size = ftell(in);
+      fseek(in, 0, SEEK_SET);
+
+      sendf_line(fd, "upload %s %ld", job->path2, size);
+      char buf[4096];
+      long remaining = size;
+      while (remaining > 0) {
+        size_t n = fread(buf, 1, sizeof(buf), in);
+        if (n == 0) {
+          break;
+        }
+        send_blob(fd, buf, n);
+        remaining -= (long)n;
+      }
+      fclose(in);
+      if (recv_line(fd, line, sizeof(line)) > 0 && strncmp(line, "OK", 2) == 0) {
+        ok = 1;
+        break;
+      }
+      int code = -1;
+      if (sscanf(line, "ERR %d", &code) == 1 &&
+          (code == ERR_PERM || code == ERR_BUSY || code == ERR_NOT_FOUND || code == ERR_IO)) {
+        struct timespec req = {.tv_sec = 0, .tv_nsec = 100000000};
+        nanosleep(&req, NULL);
+        continue;
+      }
+      break;
     }
-    fclose(in);
-    char line[256];
-    if (recv_line(fd, line, sizeof(line)) > 0 && strncmp(line, "OK", 2) == 0) {
+    if (ok) {
       fprintf(stdout, "[Background] Command: upload %s %s concluded\n", job->path2, job->path1);
       fflush(stdout);
     } else {

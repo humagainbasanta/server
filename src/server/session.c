@@ -105,6 +105,10 @@ void session_run(struct client_session *sess) {
     }
 
     if (strcmp(cmd, "login") == 0) {
+      if (sess->logged_in) {
+        send_err(sess->fd, ERR_PERM, "already logged in");
+        continue;
+      }
       char *user = strtok(NULL, " ");
       if (!user) {
         send_err(sess->fd, ERR_INVALID, "usage: login <name>");
@@ -130,6 +134,28 @@ void session_run(struct client_session *sess) {
       sess->logged_in = 1;
       users_register_active(user, sess->fd);
       sendf_line(sess->fd, "OK");
+      continue;
+    }
+
+    if (strcmp(cmd, "logout") == 0) {
+      if (!sess->logged_in) {
+        send_err(sess->fd, ERR_PERM, "not logged in");
+        continue;
+      }
+      users_unregister_active(sess->fd);
+      sess->logged_in = 0;
+      sess->user[0] = '\0';
+      sess->home[0] = '\0';
+      sess->cwd[0] = '\0';
+      sendf_line(sess->fd, "OK");
+      continue;
+    }
+
+    if (strcmp(cmd, "whoami") == 0) {
+      if (require_login(sess) != 0) {
+        continue;
+      }
+      sendf_line(sess->fd, "OK %s", sess->user);
       continue;
     }
 

@@ -17,6 +17,55 @@ static void print_server_line(const char *line) {
   }
 }
 
+static void print_prompt(const struct client_state *state) {
+  if (!isatty(STDIN_FILENO)) {
+    printf("> ");
+    fflush(stdout);
+    return;
+  }
+  if (state && state->logged_in) {
+    fprintf(stderr, "%s> ", state->user);
+  } else {
+    fprintf(stderr, "client# ");
+  }
+  fflush(stderr);
+}
+
+static void print_help(int logged_in) {
+  fprintf(stderr, "Commands:\n");
+  fprintf(stderr, "  help\n");
+  fprintf(stderr, "  exit\n");
+  fprintf(stderr, "  create_user <username> <perm_octal>\n");
+  fprintf(stderr, "  login <username>\n");
+  fprintf(stderr, "  logout\n");
+  fprintf(stderr, "  whoami\n");
+  fprintf(stderr, "\nCommands (login required):\n");
+  fprintf(stderr, "  create [-d] <path> <perm_octal>\n");
+  fprintf(stderr, "  chmod <path> <perm_octal>\n");
+  fprintf(stderr, "  move <path1> <path2>\n");
+  fprintf(stderr, "  delete <path>\n");
+  fprintf(stderr, "  cd <path>\n");
+  fprintf(stderr, "  list [path]\n");
+  fprintf(stderr, "  read [-o set=N|-offset=N] <path>\n");
+  fprintf(stderr, "  write [-o set=N|-offset=N] <path>\n");
+  fprintf(stderr, "  upload [-b] <client_path> <server_path>\n");
+  fprintf(stderr, "  download [-b] <server_path> <client_path>\n");
+  fprintf(stderr, "  transfer_request <file> <dest_user>\n");
+  fprintf(stderr, "  accept <dest_dir> <id>\n");
+  fprintf(stderr, "  reject <id>\n");
+  if (!logged_in) {
+    fprintf(stderr, "\nTip: login first to use file commands.\n");
+  }
+  fprintf(stderr, "\nExamples:\n");
+  fprintf(stderr, "  create_user alice 0770\n");
+  fprintf(stderr, "  login alice\n");
+  fprintf(stderr, "  create test.txt 0660\n");
+  fprintf(stderr, "  write test.txt  (finish with two empty lines)\n");
+  fprintf(stderr, "  read -o set=6 test.txt\n");
+  fprintf(stderr, "  upload -b /tmp/local.txt remote.txt\n");
+  fprintf(stderr, "  download remote.txt /tmp/local.txt\n");
+}
+
 static int recv_status_line(int fd, char *buf, size_t cap) {
   while (1) {
     int n = recv_line(fd, buf, cap);
@@ -127,6 +176,46 @@ static int read_stdin_all(unsigned char **out, size_t *out_size) {
   return 0;
 }
 
+static int read_stdin_write_payload(unsigned char **out, size_t *out_size) {
+  if (isatty(STDIN_FILENO)) {
+    unsigned char *buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    char line[4096];
+    int empty_streak = 0;
+    while (fgets(line, sizeof(line), stdin)) {
+      size_t n = strlen(line);
+      if (n == 1 && line[0] == '\n') {
+        empty_streak++;
+      } else {
+        empty_streak = 0;
+      }
+      if (empty_streak >= 2) {
+        break;
+      }
+      if (len + n > cap) {
+        size_t new_cap = cap ? cap * 2 : 8192;
+        while (new_cap < len + n) {
+          new_cap *= 2;
+        }
+        unsigned char *next = realloc(buf, new_cap);
+        if (!next) {
+          free(buf);
+          return -1;
+        }
+        buf = next;
+        cap = new_cap;
+      }
+      memcpy(buf + len, line, n);
+      len += n;
+    }
+    *out = buf;
+    *out_size = len;
+    return 0;
+  }
+  return read_stdin_all(out, out_size);
+}
+
 static int parse_offset_tokens(char *arg1, char *arg2, char **out_path, long *out_offset) {
   if (!out_path || !out_offset) {
     return -1;
@@ -149,7 +238,7 @@ static int parse_offset_tokens(char *arg1, char *arg2, char **out_path, long *ou
 static int handle_write(int fd, const char *path, long offset) {
   unsigned char *payload = NULL;
   size_t size = 0;
-  if (read_stdin_all(&payload, &size) != 0) {
+  if (read_stdin_write_payload(&payload, &size) != 0) {
     return -1;
   }
 
@@ -256,9 +345,11 @@ static int handle_download(int fd, const char *remote_path, const char *local_pa
 
 void client_loop(struct client_state *state) {
   char line[2048];
+  if (isatty(STDIN_FILENO)) {
+    fprintf(stderr, "Type 'help' to see available commands.\n");
+  }
   while (1) {
-    printf("> ");
-    fflush(stdout);
+    print_prompt(state);
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
@@ -274,8 +365,7 @@ void client_loop(struct client_state *state) {
         break;
       }
       print_server_line(notice);
-      printf("> ");
-      fflush(stdout);
+      print_prompt(state);
       continue;
     }
     if (!fgets(line, sizeof(line), stdin)) {
@@ -302,6 +392,11 @@ void client_loop(struct client_state *state) {
       continue;
     }
 
+    if (strcmp(cmd, "help") == 0) {
+      print_help(state->logged_in);
+      continue;
+    }
+
     if (strcmp(cmd, "exit") == 0) {
       if (bg_jobs_pending() > 0) {
         printf("Background jobs running, exit aborted\n");
@@ -312,6 +407,10 @@ void client_loop(struct client_state *state) {
     }
 
     if (strcmp(cmd, "login") == 0) {
+      if (state->logged_in) {
+        printf("already logged in (use logout)\n");
+        continue;
+      }
       char *user = strtok(NULL, " ");
       if (!user) {
         printf("usage: login <user>\n");
@@ -320,6 +419,18 @@ void client_loop(struct client_state *state) {
       if (handle_simple(state->fd, line) == 0) {
         snprintf(state->user, sizeof(state->user), "%s", user);
         state->logged_in = 1;
+      }
+      continue;
+    }
+
+    if (strcmp(cmd, "logout") == 0) {
+      if (!state->logged_in) {
+        printf("not logged in\n");
+        continue;
+      }
+      if (handle_simple(state->fd, line) == 0) {
+        state->logged_in = 0;
+        state->user[0] = '\0';
       }
       continue;
     }

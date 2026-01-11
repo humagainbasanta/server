@@ -93,3 +93,153 @@ This terminates the server immediately.
 - All paths are sandboxed inside the server root; users cannot access outside.
 - Operations accept absolute and relative paths, plus `.` and `..`.
 - Offsets support `-offset=` and `-o set=` forms for `read` and `write`.
+
+## Tests
+```bash
+bash scripts/test_requirements.sh
+```
+Runs the full requirement checks.
+
+```bash
+bash tests/run_tests.sh
+```
+Runs a smaller end-to-end harness.
+
+## Submission zip
+```bash
+bash tools/make_submission_zip.sh
+```
+Creates `csap_project.zip` with source, README, and build script only.
+
+## Commands and expected outputs
+Below are minimal examples with typical server responses.
+
+```bash
+create_user alice 0770
+```
+Expected: `OK`
+
+```bash
+login alice
+```
+Expected: `OK`
+
+```bash
+logout
+```
+Expected: `OK`
+
+```bash
+whoami
+```
+Expected: `OK alice`
+
+```bash
+create test.txt 0660
+```
+Expected: `OK`
+
+```bash
+create -d dir 0770
+```
+Expected: `OK`
+
+```bash
+chmod test.txt 0660
+```
+Expected: `OK`
+
+```bash
+move test.txt moved.txt
+```
+Expected: `OK`
+
+```bash
+delete moved.txt
+```
+Expected: `OK`
+
+```bash
+cd dir
+```
+Expected: `OK`
+
+```bash
+list
+```
+Expected:
+```
+OK
+<perm> <size> <name>
+END
+```
+
+```bash
+read test.txt
+```
+Expected:
+```
+OK <size>
+<file bytes printed to stdout>
+```
+
+```bash
+read -offset=6 test.txt
+```
+Expected:
+```
+OK <size>
+<file bytes from offset>
+```
+
+```bash
+write test.txt
+```
+Type content, finish with two empty lines. Expected: `OK <bytes_written>`
+
+```bash
+write -offset=5 test.txt
+```
+Type content, finish with two empty lines. Expected: `OK <bytes_written>`
+
+```bash
+upload /tmp/local.txt uploaded.txt
+```
+Expected: `OK`
+
+```bash
+download uploaded.txt /tmp/downloaded.txt
+```
+Expected: `OK`
+
+```bash
+upload -b /tmp/local.txt bg_up.txt
+```
+Expected background line:
+`[Background] Command: upload bg_up.txt /tmp/local.txt concluded`
+
+```bash
+download -b bg_up.txt /tmp/bg_down.txt
+```
+Expected background line:
+`[Background] Command: download bg_up.txt /tmp/bg_down.txt concluded`
+
+```bash
+transfer_request uploaded.txt bob
+```
+Expected: `OK <id>` and receiver sees `NOTICE TRANSFER <id> alice uploaded.txt`
+
+```bash
+accept . <id>
+```
+Expected: `OK`
+
+```bash
+reject <id>
+```
+Expected: `OK`
+
+```bash
+exit
+```
+Expected: `OK`

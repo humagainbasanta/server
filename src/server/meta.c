@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,8 @@ struct meta_entry {
   char *owner;
   int perm;
 };
+
+static pthread_mutex_t g_meta_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int meta_path(const char *root, char *out, size_t cap) {
   if (!root || !out) {
@@ -156,9 +159,11 @@ int meta_init(const char *root) {
   if (!root) {
     return -1;
   }
+  pthread_mutex_lock(&g_meta_mu);
   struct meta_entry *entries = NULL;
   size_t count = 0;
   if (load_entries(root, &entries, &count) != 0) {
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
 
@@ -181,6 +186,7 @@ int meta_init(const char *root) {
 
   int rc = save_entries(root, entries, count);
   free_entries(entries, count);
+  pthread_mutex_unlock(&g_meta_mu);
   return rc;
 }
 
@@ -188,14 +194,17 @@ int meta_get(const char *root, const char *path, char *owner, size_t owner_cap, 
   if (!path || !perm) {
     return -1;
   }
+  pthread_mutex_lock(&g_meta_mu);
   struct meta_entry *entries = NULL;
   size_t count = 0;
   if (load_entries(root, &entries, &count) != 0) {
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
   int idx = find_entry(entries, count, path);
   if (idx < 0) {
     free_entries(entries, count);
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
   if (owner && owner_cap > 0) {
@@ -203,6 +212,7 @@ int meta_get(const char *root, const char *path, char *owner, size_t owner_cap, 
   }
   *perm = entries[idx].perm & 0770;
   free_entries(entries, count);
+  pthread_mutex_unlock(&g_meta_mu);
   return 0;
 }
 
@@ -210,9 +220,11 @@ int meta_set(const char *root, const char *path, const char *owner, int perm) {
   if (!path || !owner) {
     return -1;
   }
+  pthread_mutex_lock(&g_meta_mu);
   struct meta_entry *entries = NULL;
   size_t count = 0;
   if (load_entries(root, &entries, &count) != 0) {
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
   int idx = find_entry(entries, count, path);
@@ -228,6 +240,7 @@ int meta_set(const char *root, const char *path, const char *owner, int perm) {
     entries[count].perm = perm & 0770;
     if (!entries[count].path || !entries[count].owner) {
       free_entries(entries, count + 1);
+      pthread_mutex_unlock(&g_meta_mu);
       return -1;
     }
     count++;
@@ -237,12 +250,14 @@ int meta_set(const char *root, const char *path, const char *owner, int perm) {
     entries[idx].perm = perm & 0770;
     if (!entries[idx].owner) {
       free_entries(entries, count);
+      pthread_mutex_unlock(&g_meta_mu);
       return -1;
     }
   }
 
   int rc = save_entries(root, entries, count);
   free_entries(entries, count);
+  pthread_mutex_unlock(&g_meta_mu);
   return rc;
 }
 
@@ -250,9 +265,11 @@ int meta_remove(const char *root, const char *path) {
   if (!path) {
     return -1;
   }
+  pthread_mutex_lock(&g_meta_mu);
   struct meta_entry *entries = NULL;
   size_t count = 0;
   if (load_entries(root, &entries, &count) != 0) {
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
   int idx = find_entry(entries, count, path);
@@ -264,6 +281,7 @@ int meta_remove(const char *root, const char *path) {
   }
   int rc = save_entries(root, entries, count);
   free_entries(entries, count);
+  pthread_mutex_unlock(&g_meta_mu);
   return rc;
 }
 
@@ -271,9 +289,11 @@ int meta_move(const char *root, const char *old_path, const char *new_path) {
   if (!old_path || !new_path) {
     return -1;
   }
+  pthread_mutex_lock(&g_meta_mu);
   struct meta_entry *entries = NULL;
   size_t count = 0;
   if (load_entries(root, &entries, &count) != 0) {
+    pthread_mutex_unlock(&g_meta_mu);
     return -1;
   }
   size_t old_len = strlen(old_path);
@@ -288,18 +308,21 @@ int meta_move(const char *root, const char *old_path, const char *new_path) {
       char updated[PATH_MAX];
       if (snprintf(updated, sizeof(updated), "%s%s", new_path, suffix) >= (int)sizeof(updated)) {
         free_entries(entries, count);
+        pthread_mutex_unlock(&g_meta_mu);
         return -1;
       }
       free(entries[i].path);
       entries[i].path = dup_str(updated);
       if (!entries[i].path) {
         free_entries(entries, count);
+        pthread_mutex_unlock(&g_meta_mu);
         return -1;
       }
     }
   }
   int rc = save_entries(root, entries, count);
   free_entries(entries, count);
+  pthread_mutex_unlock(&g_meta_mu);
   return rc;
 }
 

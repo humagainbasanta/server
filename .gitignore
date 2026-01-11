@@ -1,0 +1,7 @@
+Client
+Server
+server_root
+*.log
+*.o
+*.zip
+.DS_Store

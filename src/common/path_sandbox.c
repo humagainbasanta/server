@@ -53,6 +53,13 @@ static int normalize_abs_path(const char *in, char *out, size_t cap) {
   return 0;
 }
 
+static int normalize_root(const char *root, char *out, size_t cap) {
+  if (!root || root[0] != '/') {
+    return -1;
+  }
+  return normalize_abs_path(root, out, cap);
+}
+
 int resolve_path_in_root(const char *root, const char *base_abs,
                          const char *input, char *out, size_t cap) {
   if (!root || !base_abs || !input || !out) {
@@ -71,6 +78,13 @@ int resolve_path_in_root(const char *root, const char *base_abs,
   }
 
   if (normalize_abs_path(merged, out, cap) != 0) {
+    return -1;
+  }
+  char root_norm[PATH_MAX];
+  if (normalize_root(root, root_norm, sizeof(root_norm)) != 0) {
+    return -1;
+  }
+  if (!path_is_within(root_norm, out)) {
     return -1;
   }
   return 0;

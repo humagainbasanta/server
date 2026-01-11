@@ -58,11 +58,13 @@ int fs_cmd_create(struct client_session *sess, const char *path, int is_dir, int
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
 
-  locks_write_lock();
+  if (locks_wrlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   char parent[PATH_MAX];
   if (parent_dir(full, parent, sizeof(parent)) != 0 ||
       meta_check_access(sess->cfg->root, parent, sess->user, 0, 1, 1) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
 
@@ -85,7 +87,7 @@ int fs_cmd_create(struct client_session *sess, const char *path, int is_dir, int
       rc = sendf_line(sess->fd, "OK");
     }
   }
-  locks_unlock();
+  locks_unlock(full);
   return rc;
 }
 
@@ -94,15 +96,17 @@ int fs_cmd_chmod(struct client_session *sess, const char *path, int perm_oct) {
   if (resolve_for_user(sess, path, full, sizeof(full), 0) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_write_lock();
+  if (locks_wrlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   char owner[64];
   int current_perm = 0;
   if (meta_get(sess->cfg->root, full, owner, sizeof(owner), &current_perm) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_NOT_FOUND, "metadata missing");
   }
   if (strcmp(owner, sess->user) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "not owner");
   }
   int masked = perm_oct & 0770;
@@ -113,7 +117,7 @@ int fs_cmd_chmod(struct client_session *sess, const char *path, int perm_oct) {
     meta_set(sess->cfg->root, full, sess->user, masked);
     rc = sendf_line(sess->fd, "OK");
   }
-  locks_unlock();
+  locks_unlock(full);
   return rc;
 }
 
@@ -124,14 +128,16 @@ int fs_cmd_move(struct client_session *sess, const char *src, const char *dst) {
       resolve_for_user(sess, dst, full_dst, sizeof(full_dst), 0) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_write_lock();
+  if (locks_wrlock_pair(full_src, full_dst) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   char src_parent[PATH_MAX];
   char dst_parent[PATH_MAX];
   if (parent_dir(full_src, src_parent, sizeof(src_parent)) != 0 ||
       parent_dir(full_dst, dst_parent, sizeof(dst_parent)) != 0 ||
       meta_check_access(sess->cfg->root, src_parent, sess->user, 0, 1, 1) != 0 ||
       meta_check_access(sess->cfg->root, dst_parent, sess->user, 0, 1, 1) != 0) {
-    locks_unlock();
+    locks_unlock_pair(full_src, full_dst);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
   int rc = 0;
@@ -141,7 +147,7 @@ int fs_cmd_move(struct client_session *sess, const char *src, const char *dst) {
     meta_move(sess->cfg->root, full_src, full_dst);
     rc = sendf_line(sess->fd, "OK");
   }
-  locks_unlock();
+  locks_unlock_pair(full_src, full_dst);
   return rc;
 }
 
@@ -150,11 +156,13 @@ int fs_cmd_delete(struct client_session *sess, const char *path) {
   if (resolve_for_user(sess, path, full, sizeof(full), 0) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_write_lock();
+  if (locks_wrlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   char parent[PATH_MAX];
   if (parent_dir(full, parent, sizeof(parent)) != 0 ||
       meta_check_access(sess->cfg->root, parent, sess->user, 0, 1, 1) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
   int rc = 0;
@@ -164,7 +172,7 @@ int fs_cmd_delete(struct client_session *sess, const char *path) {
     meta_remove(sess->cfg->root, full);
     rc = sendf_line(sess->fd, "OK");
   }
-  locks_unlock();
+  locks_unlock(full);
   return rc;
 }
 
@@ -173,18 +181,20 @@ int fs_cmd_cd(struct client_session *sess, const char *path) {
   if (resolve_for_user(sess, path, full, sizeof(full), 0) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_read_lock();
+  if (locks_rdlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   if (meta_check_access(sess->cfg->root, full, sess->user, 0, 0, 1) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
   struct stat st;
   if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_NOT_FOUND, "not a directory");
   }
   snprintf(sess->cwd, sizeof(sess->cwd), "%s", full);
-  locks_unlock();
+  locks_unlock(full);
   return sendf_line(sess->fd, "OK");
 }
 
@@ -194,20 +204,22 @@ int fs_cmd_list(struct client_session *sess, const char *path) {
   if (resolve_for_user(sess, target, full, sizeof(full), 1) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside root");
   }
-  locks_read_lock();
+  if (locks_rdlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   if (meta_check_access(sess->cfg->root, full, sess->user, 1, 0, 1) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
 
   DIR *dir = opendir(full);
   if (!dir) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_NOT_FOUND, "list failed: %s", strerror(errno));
   }
   int rc = sendf_line(sess->fd, "OK");
   if (rc != 0) {
-    locks_unlock();
+    locks_unlock(full);
     closedir(dir);
     return rc;
   }
@@ -236,7 +248,7 @@ int fs_cmd_list(struct client_session *sess, const char *path) {
     sendf_line(sess->fd, "%s %ld %s", perm, (long)st.st_size, ent->d_name);
   }
   sendf_line(sess->fd, "END");
-  locks_unlock();
+  locks_unlock(full);
   closedir(dir);
   return 0;
 }
@@ -246,21 +258,23 @@ int fs_cmd_read(struct client_session *sess, const char *path, long offset) {
   if (resolve_for_user(sess, path, full, sizeof(full), 0) != 0) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_read_lock();
+  if (locks_rdlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   if (meta_check_access(sess->cfg->root, full, sess->user, 1, 0, 0) != 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
   int fd = open(full, O_RDONLY);
   if (fd < 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_NOT_FOUND, "open failed: %s", strerror(errno));
   }
 
   struct stat st;
   if (fstat(fd, &st) != 0) {
     close(fd);
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_IO, "stat failed: %s", strerror(errno));
   }
 
@@ -269,7 +283,7 @@ int fs_cmd_read(struct client_session *sess, const char *path, long offset) {
   }
   if (lseek(fd, offset, SEEK_SET) < 0) {
     close(fd);
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_IO, "seek failed: %s", strerror(errno));
   }
 
@@ -279,7 +293,7 @@ int fs_cmd_read(struct client_session *sess, const char *path, long offset) {
   }
   if (sendf_line(sess->fd, "OK %ld", (long)remaining) != 0) {
     close(fd);
-    locks_unlock();
+    locks_unlock(full);
     return -1;
   }
 
@@ -296,7 +310,7 @@ int fs_cmd_read(struct client_session *sess, const char *path, long offset) {
   }
 
   close(fd);
-  locks_unlock();
+  locks_unlock(full);
   return 0;
 }
 
@@ -306,26 +320,28 @@ int fs_cmd_write(struct client_session *sess, const char *path, long offset, siz
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
 
-  locks_write_lock();
+  if (locks_wrlock(full) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   struct stat st;
   int exists = (stat(full, &st) == 0);
   if (exists) {
     if (meta_check_access(sess->cfg->root, full, sess->user, 0, 1, 0) != 0) {
-      locks_unlock();
+      locks_unlock(full);
       return send_err(sess->fd, ERR_PERM, "permission denied");
     }
   } else {
     char parent[PATH_MAX];
     if (parent_dir(full, parent, sizeof(parent)) != 0 ||
         meta_check_access(sess->cfg->root, parent, sess->user, 0, 1, 1) != 0) {
-      locks_unlock();
+      locks_unlock(full);
       return send_err(sess->fd, ERR_PERM, "permission denied");
     }
   }
 
   int fd = open(full, O_WRONLY | O_CREAT, 0700);
   if (fd < 0) {
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_IO, "open failed: %s", strerror(errno));
   }
   if (offset < 0) {
@@ -333,7 +349,7 @@ int fs_cmd_write(struct client_session *sess, const char *path, long offset, siz
   }
   if (lseek(fd, offset, SEEK_SET) < 0) {
     close(fd);
-    locks_unlock();
+    locks_unlock(full);
     return send_err(sess->fd, ERR_IO, "seek failed: %s", strerror(errno));
   }
 
@@ -343,12 +359,12 @@ int fs_cmd_write(struct client_session *sess, const char *path, long offset, siz
     size_t chunk = remaining > sizeof(buf) ? sizeof(buf) : remaining;
     if (recv_blob(sess->fd, buf, chunk) != 0) {
       close(fd);
-      locks_unlock();
+      locks_unlock(full);
       return send_err(sess->fd, ERR_IO, "read from client failed");
     }
     if (write_full(fd, buf, chunk) < 0) {
       close(fd);
-      locks_unlock();
+      locks_unlock(full);
       return send_err(sess->fd, ERR_IO, "write failed: %s", strerror(errno));
     }
     remaining -= chunk;
@@ -358,7 +374,7 @@ int fs_cmd_write(struct client_session *sess, const char *path, long offset, siz
   if (!exists) {
     meta_set(sess->cfg->root, full, sess->user, 0700);
   }
-  locks_unlock();
+  locks_unlock(full);
   return sendf_line(sess->fd, "OK %zu", size);
 }
 

@@ -74,6 +74,59 @@ static int copy_file(const char *src, const char *dst) {
   return 0;
 }
 
+static int lock_src_dest(const char *src, const char *dst) {
+  if (!src || !dst) {
+    return -1;
+  }
+  if (strcmp(src, dst) == 0) {
+    return locks_wrlock(src);
+  }
+  const char *first = src;
+  const char *second = dst;
+  int first_read = 1;
+  if (strcmp(src, dst) > 0) {
+    first = dst;
+    second = src;
+    first_read = 0;
+  }
+  if (first_read) {
+    if (locks_rdlock(first) != 0) {
+      return -1;
+    }
+    if (locks_wrlock(second) != 0) {
+      locks_unlock(first);
+      return -1;
+    }
+  } else {
+    if (locks_wrlock(first) != 0) {
+      return -1;
+    }
+    if (locks_rdlock(second) != 0) {
+      locks_unlock(first);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static void unlock_src_dest(const char *src, const char *dst) {
+  if (!src || !dst) {
+    return;
+  }
+  if (strcmp(src, dst) == 0) {
+    locks_unlock(src);
+    return;
+  }
+  const char *first = src;
+  const char *second = dst;
+  if (strcmp(src, dst) > 0) {
+    first = dst;
+    second = src;
+  }
+  locks_unlock(second);
+  locks_unlock(first);
+}
+
 static int add_request_locked(const struct transfer_request *req) {
   if (g_transfers.count >= MAX_TRANSFERS) {
     return -1;
@@ -109,12 +162,14 @@ int transfer_request_create(struct client_session *sess, const char *file, const
       !path_is_within(sess->home, full_src)) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_read_lock();
+  if (locks_rdlock(full_src) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   if (meta_check_access(sess->cfg->root, full_src, sess->user, 1, 0, 0) != 0) {
-    locks_unlock();
+    locks_unlock(full_src);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
-  locks_unlock();
+  locks_unlock(full_src);
 
   int dest_fd = users_get_active_fd(dest_user);
   if (dest_fd < 0) {
@@ -165,12 +220,14 @@ int transfer_accept(struct client_session *sess, const char *dir, int id) {
       !path_is_within(sess->home, dest_dir)) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
-  locks_read_lock();
+  if (locks_rdlock(dest_dir) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   if (meta_check_access(sess->cfg->root, dest_dir, sess->user, 0, 1, 1) != 0) {
-    locks_unlock();
+    locks_unlock(dest_dir);
     return send_err(sess->fd, ERR_PERM, "permission denied");
   }
-  locks_unlock();
+  locks_unlock(dest_dir);
 
   char base_name[PATH_MAX];
   const char *slash = strrchr(req.file_path, '/');
@@ -182,7 +239,9 @@ int transfer_accept(struct client_session *sess, const char *dir, int id) {
     return send_err(sess->fd, ERR_INVALID, "path too long");
   }
 
-  locks_write_lock();
+  if (lock_src_dest(req.file_path, dest_path) != 0) {
+    return send_err(sess->fd, ERR_IO, "lock failed");
+  }
   int copy_rc = copy_file(req.file_path, dest_path);
   if (copy_rc == 0) {
     int src_perm = 0700;
@@ -191,7 +250,7 @@ int transfer_accept(struct client_session *sess, const char *dir, int id) {
     }
     meta_set(sess->cfg->root, dest_path, sess->user, src_perm);
   }
-  locks_unlock();
+  unlock_src_dest(req.file_path, dest_path);
   if (copy_rc != 0) {
     return send_err(sess->fd, ERR_IO, "copy failed: %s", strerror(errno));
   }

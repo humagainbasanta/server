@@ -51,6 +51,14 @@ int main(int argc, char **argv) {
     perror("listen");
     return 1;
   }
+
+  if (geteuid() == 0) {
+    if (seteuid(getuid()) != 0) {
+      perror("seteuid");
+      close(listen_fd);
+      return 1;
+    }
+  }
   log_info("Server listening on %s:%d (root=%s)", cfg.ip, cfg.port, cfg.root);
 
   while (1) {

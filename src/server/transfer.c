@@ -4,6 +4,7 @@
 #include "common/path_sandbox.h"
 #include "common/protocol.h"
 #include "server/locks.h"
+#include "server/meta.h"
 #include "server/session.h"
 #include "server/users.h"
 
@@ -108,6 +109,12 @@ int transfer_request_create(struct client_session *sess, const char *file, const
       !path_is_within(sess->home, full_src)) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
+  locks_read_lock();
+  if (meta_check_access(sess->cfg->root, full_src, sess->user, 1, 0, 0) != 0) {
+    locks_unlock();
+    return send_err(sess->fd, ERR_PERM, "permission denied");
+  }
+  locks_unlock();
 
   int dest_fd = users_get_active_fd(dest_user);
   if (dest_fd < 0) {
@@ -158,6 +165,12 @@ int transfer_accept(struct client_session *sess, const char *dir, int id) {
       !path_is_within(sess->home, dest_dir)) {
     return send_err(sess->fd, ERR_PERM, "path outside home");
   }
+  locks_read_lock();
+  if (meta_check_access(sess->cfg->root, dest_dir, sess->user, 0, 1, 1) != 0) {
+    locks_unlock();
+    return send_err(sess->fd, ERR_PERM, "permission denied");
+  }
+  locks_unlock();
 
   char base_name[PATH_MAX];
   const char *slash = strrchr(req.file_path, '/');
@@ -171,6 +184,13 @@ int transfer_accept(struct client_session *sess, const char *dir, int id) {
 
   locks_write_lock();
   int copy_rc = copy_file(req.file_path, dest_path);
+  if (copy_rc == 0) {
+    int src_perm = 0700;
+    if (meta_get(sess->cfg->root, req.file_path, NULL, 0, &src_perm) != 0) {
+      src_perm = 0700;
+    }
+    meta_set(sess->cfg->root, dest_path, sess->user, src_perm);
+  }
   locks_unlock();
   if (copy_rc != 0) {
     return send_err(sess->fd, ERR_IO, "copy failed: %s", strerror(errno));

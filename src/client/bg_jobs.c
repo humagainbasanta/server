@@ -3,11 +3,13 @@
 #include "client/net_client.h"
 #include "common/protocol.h"
 #include "common/io.h"
+#include "common/error.h"
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 struct bg_job_args {
@@ -59,11 +61,11 @@ static int send_login(int fd, const char *user) {
 
 static void *bg_thread(void *arg) {
   struct bg_job_args *job = (struct bg_job_args *)arg;
-  pending_inc();
 
   int fd = connect_to_server(job->state.cfg.ip, job->state.cfg.port);
   if (fd < 0) {
     fprintf(stdout, "[Background] Command failed: connection\n");
+    fflush(stdout);
     pending_dec();
     free(job);
     return NULL;
@@ -71,6 +73,7 @@ static void *bg_thread(void *arg) {
 
   if (send_login(fd, job->state.user) != 0) {
     fprintf(stdout, "[Background] Command failed: login\n");
+    fflush(stdout);
     close(fd);
     pending_dec();
     free(job);
@@ -81,6 +84,7 @@ static void *bg_thread(void *arg) {
     FILE *in = fopen(job->path1, "rb");
     if (!in) {
       fprintf(stdout, "[Background] Command failed: upload\n");
+      fflush(stdout);
       close(fd);
       pending_dec();
       free(job);
@@ -103,12 +107,36 @@ static void *bg_thread(void *arg) {
     }
     fclose(in);
     char line[256];
-    recv_line(fd, line, sizeof(line));
-    fprintf(stdout, "[Background] Command: upload %s %s concluded\n", job->path1, job->path2);
-  } else {
-    sendf_line(fd, "download %s", job->path1);
-    char line[256];
     if (recv_line(fd, line, sizeof(line)) > 0 && strncmp(line, "OK", 2) == 0) {
+      fprintf(stdout, "[Background] Command: upload %s %s concluded\n", job->path2, job->path1);
+      fflush(stdout);
+    } else {
+      fprintf(stdout, "[Background] Command failed: upload\n");
+      fflush(stdout);
+    }
+  } else {
+    char line[256];
+    int attempts = 40;
+    int ok = 0;
+    while (attempts-- > 0) {
+      sendf_line(fd, "download %s", job->path1);
+      if (recv_line(fd, line, sizeof(line)) <= 0) {
+        break;
+      }
+      if (strncmp(line, "OK", 2) == 0) {
+        ok = 1;
+        break;
+      }
+      int code = -1;
+      if (sscanf(line, "ERR %d", &code) == 1 &&
+          (code == ERR_NOT_FOUND || code == ERR_PERM)) {
+        struct timespec req = {.tv_sec = 0, .tv_nsec = 100000000};
+        nanosleep(&req, NULL);
+        continue;
+      }
+      break;
+    }
+    if (ok) {
       long size = 0;
       sscanf(line, "OK %ld", &size);
       FILE *out = fopen(job->path2, "wb");
@@ -125,7 +153,14 @@ static void *bg_thread(void *arg) {
         }
         fclose(out);
         fprintf(stdout, "[Background] Command: download %s %s concluded\n", job->path1, job->path2);
+        fflush(stdout);
+      } else {
+        fprintf(stdout, "[Background] Command failed: download\n");
+        fflush(stdout);
       }
+    } else {
+      fprintf(stdout, "[Background] Command failed: download\n");
+      fflush(stdout);
     }
   }
 
@@ -150,7 +185,9 @@ static int start_job(const struct client_state *state, const char *p1, const cha
   job->is_upload = is_upload;
 
   pthread_t tid;
+  pending_inc();
   if (pthread_create(&tid, NULL, bg_thread, job) != 0) {
+    pending_dec();
     free(job);
     return -1;
   }

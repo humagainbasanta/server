@@ -6,6 +6,7 @@
 #include "server/fs_ops.h"
 #include "server/transfer.h"
 #include "server/users.h"
+#include "server/meta.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -24,6 +25,24 @@ static long parse_offset(const char *arg) {
     return 0;
   }
   return strtol(arg + len, NULL, 10);
+}
+
+static int parse_offset_tokens(char *arg1, char *arg2, char **out_path, long *out_offset) {
+  if (!out_path || !out_offset) {
+    return -1;
+  }
+  *out_offset = 0;
+  *out_path = arg1;
+  if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
+    *out_offset = parse_offset(arg1);
+    *out_path = arg2;
+    return 0;
+  }
+  if (arg1 && arg2 && strcmp(arg1, "-o") == 0 && strncmp(arg2, "set=", 4) == 0) {
+    *out_offset = strtol(arg2 + 4, NULL, 10);
+    *out_path = strtok(NULL, " ");
+  }
+  return 0;
 }
 
 void session_init(struct client_session *sess, int fd, const struct server_config *cfg) {
@@ -100,6 +119,10 @@ void session_run(struct client_session *sess) {
       if (stat(home, &st) != 0 || !S_ISDIR(st.st_mode)) {
         send_err(sess->fd, ERR_NOT_FOUND, "user home not found");
         continue;
+      }
+      int meta_perm = 0;
+      if (meta_get(sess->cfg->root, home, NULL, 0, &meta_perm) != 0) {
+        meta_set(sess->cfg->root, home, user, (int)(st.st_mode & 0770));
       }
       snprintf(sess->user, sizeof(sess->user), "%s", user);
       snprintf(sess->home, sizeof(sess->home), "%s", home);
@@ -204,13 +227,10 @@ void session_run(struct client_session *sess) {
       char *arg1 = strtok(NULL, " ");
       char *arg2 = strtok(NULL, " ");
       long offset = 0;
-      char *path = arg1;
-      if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
-        offset = parse_offset(arg1);
-        path = arg2;
-      }
+      char *path = NULL;
+      parse_offset_tokens(arg1, arg2, &path, &offset);
       if (!path) {
-        send_err(sess->fd, ERR_INVALID, "usage: read [-offset=n] <path>");
+        send_err(sess->fd, ERR_INVALID, "usage: read [-offset=n|-o set=n] <path>");
         continue;
       }
       fs_cmd_read(sess, path, offset);
@@ -223,17 +243,23 @@ void session_run(struct client_session *sess) {
       }
       char *arg1 = strtok(NULL, " ");
       char *arg2 = strtok(NULL, " ");
-      char *arg3 = strtok(NULL, " ");
       long offset = 0;
-      char *path = arg1;
-      char *size_str = arg2;
-      if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
+      char *path = NULL;
+      char *size_str = NULL;
+      if (arg1 && arg2 && strcmp(arg1, "-o") == 0 && strncmp(arg2, "set=", 4) == 0) {
+        offset = strtol(arg2 + 4, NULL, 10);
+        path = strtok(NULL, " ");
+        size_str = strtok(NULL, " ");
+      } else if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
         offset = parse_offset(arg1);
         path = arg2;
-        size_str = arg3;
+        size_str = strtok(NULL, " ");
+      } else {
+        path = arg1;
+        size_str = arg2;
       }
       if (!path || !size_str) {
-        send_err(sess->fd, ERR_INVALID, "usage: write [-offset=n] <path> <size>");
+        send_err(sess->fd, ERR_INVALID, "usage: write [-offset=n|-o set=n] <path> <size>");
         continue;
       }
       size_t size = (size_t)strtoul(size_str, NULL, 10);

@@ -2,6 +2,7 @@
 #define CSAP_PERM_H
 
 #include <stddef.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 
 int parse_octal_perm(const char *s, mode_t *out_mode);

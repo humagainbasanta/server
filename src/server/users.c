@@ -1,6 +1,7 @@
 #include "server/users.h"
 
 #include "common/perm.h"
+#include "server/meta.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -26,6 +27,9 @@ int users_init(const char *root) {
   if (mkdir(root, 0700) != 0 && errno != EEXIST) {
     return -1;
   }
+  if (meta_init(root) != 0) {
+    return -1;
+  }
   return 0;
 }
 
@@ -46,12 +50,16 @@ int users_create(const char *root, const char *name, int perm_oct) {
   if (snprintf(path, sizeof(path), "%s/%s", root, name) >= (int)sizeof(path)) {
     return -1;
   }
-  if (mkdir(path, (mode_t)perm_oct) != 0) {
+  int masked = perm_oct & 0770;
+  if (mkdir(path, (mode_t)masked) != 0) {
     if (errno != EEXIST) {
       return -1;
     }
   }
-  chmod(path, (mode_t)perm_oct);
+  chmod(path, (mode_t)masked);
+  if (meta_set(root, path, name, masked) != 0) {
+    return -1;
+  }
 
   pthread_mutex_lock(&g_users.mu);
   int idx = find_user_locked(name);

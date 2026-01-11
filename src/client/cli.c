@@ -7,19 +7,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
+#include <time.h>
 #include <unistd.h>
-
-static int recv_status_line(int fd, char *buf, size_t cap) {
-  int n = recv_line(fd, buf, cap);
-  if (n <= 0) {
-    return -1;
-  }
-  return 0;
-}
 
 static void print_server_line(const char *line) {
   if (line && line[0]) {
     printf("%s\n", line);
+  }
+}
+
+static int recv_status_line(int fd, char *buf, size_t cap) {
+  while (1) {
+    int n = recv_line(fd, buf, cap);
+    if (n <= 0) {
+      return -1;
+    }
+    if (strncmp(buf, "NOTICE ", 7) == 0) {
+      print_server_line(buf);
+      continue;
+    }
+    return 0;
   }
 }
 
@@ -116,6 +124,25 @@ static int read_stdin_all(unsigned char **out, size_t *out_size) {
 
   *out = buf;
   *out_size = len;
+  return 0;
+}
+
+static int parse_offset_tokens(char *arg1, char *arg2, char **out_path, long *out_offset) {
+  if (!out_path || !out_offset) {
+    return -1;
+  }
+  *out_offset = 0;
+  *out_path = arg1;
+  if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
+    *out_offset = strtol(arg1 + 8, NULL, 10);
+    *out_path = arg2;
+    return 0;
+  }
+  if (arg1 && arg2 && strcmp(arg1, "-o") == 0 && strncmp(arg2, "set=", 4) == 0) {
+    *out_offset = strtol(arg2 + 4, NULL, 10);
+    *out_path = strtok(NULL, " ");
+    return 0;
+  }
   return 0;
 }
 
@@ -232,7 +259,32 @@ void client_loop(struct client_state *state) {
   while (1) {
     printf("> ");
     fflush(stdout);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
+    FD_SET(state->fd, &rfds);
+    int maxfd = state->fd > STDIN_FILENO ? state->fd : STDIN_FILENO;
+    if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
+      continue;
+    }
+    if (FD_ISSET(state->fd, &rfds)) {
+      char notice[1024];
+      int n = recv_line(state->fd, notice, sizeof(notice));
+      if (n <= 0) {
+        break;
+      }
+      print_server_line(notice);
+      printf("> ");
+      fflush(stdout);
+      continue;
+    }
     if (!fgets(line, sizeof(line), stdin)) {
+      if (bg_jobs_pending() > 0) {
+        while (bg_jobs_pending() > 0) {
+          struct timespec req = {.tv_sec = 0, .tv_nsec = 100000000};
+          nanosleep(&req, NULL);
+        }
+      }
       break;
     }
     size_t len = strlen(line);
@@ -334,13 +386,10 @@ void client_loop(struct client_state *state) {
       char *arg1 = strtok(NULL, " ");
       char *arg2 = strtok(NULL, " ");
       long offset = 0;
-      char *path = arg1;
-      if (arg1 && strncmp(arg1, "-offset=", 8) == 0) {
-        offset = strtol(arg1 + 8, NULL, 10);
-        path = arg2;
-      }
+      char *path = NULL;
+      parse_offset_tokens(arg1, arg2, &path, &offset);
       if (!path) {
-        printf("usage: write [-offset=n] <path>\n");
+        printf("usage: write [-offset=n|-o set=n] <path>\n");
         continue;
       }
       handle_write(state->fd, path, offset);

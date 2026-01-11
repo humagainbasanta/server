@@ -1,8 +1,10 @@
 #include "server/config.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void set_defaults(struct server_config *cfg) {
   snprintf(cfg->root, sizeof(cfg->root), "%s", "./server_root");
@@ -23,6 +25,16 @@ int server_config_parse(struct server_config *cfg, int argc, char **argv) {
   }
   if (argc >= 4) {
     cfg->port = atoi(argv[3]);
+  }
+  if (cfg->root[0] != '/') {
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+      char abs_root[PATH_MAX];
+      if (snprintf(abs_root, sizeof(abs_root), "%s/%s", cwd, cfg->root) <
+          (int)sizeof(abs_root)) {
+        snprintf(cfg->root, sizeof(cfg->root), "%s", abs_root);
+      }
+    }
   }
   return 0;
 }

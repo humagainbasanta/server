@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude -pthread
+CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude -pthread -D_POSIX_C_SOURCE=200809L
 LDFLAGS := -pthread
 
 COMMON_SRCS := src/common/io.c \
@@ -18,6 +18,7 @@ SERVER_SRCS := src/server/main.c \
 	src/server/fs_ops.c \
 	src/server/users.c \
 	src/server/locks.c \
+	src/server/meta.c \
 	src/server/transfer.c \
 	src/server/signals.c
 
